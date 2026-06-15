@@ -1,203 +1,117 @@
-const express = require("express");
-const Razorpay = require("razorpay");
-const crypto = require("crypto");
-const Booking = require("../models/Booking");
-const User = require("../models/User");
-const { protect } = require("../middleware/authMiddleware");
+const mongoose = require("mongoose");
 
-const router = express.Router();
-router.use(protect);
+const bookingSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    itineraryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Itinerary",
+      default: null,
+    },
 
-// Lazy-initialize Razorpay — only when a booking route is actually called.
-// This prevents a crash at startup if RAZORPAY keys are not yet set.
-let _razorpay = null;
-function getRazorpay() {
-  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-    throw new Error("Razorpay keys not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to your environment variables.");
-  }
-  if (!_razorpay) {
-    _razorpay = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID,
-      key_secret: process.env.RAZORPAY_KEY_SECRET,
-    });
-  }
-  return _razorpay;
-}
+    // Type of booking
+    bookingType: {
+      type: String,
+      enum: ["hotel", "train", "flight", "activity"],
+      required: true,
+    },
 
-// ─── GET /api/bookings ────────────────────────────────────────────────────
-router.get("/", async (req, res) => {
-  try {
-    const { bookingType, status, page = 1, limit = 10 } = req.query;
-
-    const filter = { userId: req.user._id };
-    if (bookingType) filter.bookingType = bookingType;
-    if (status) filter.status = status;
-
-    const total = await Booking.countDocuments(filter);
-    const bookings = await Booking.find(filter)
-      .sort("-createdAt")
-      .skip((page - 1) * limit)
-      .limit(Number(limit));
-
-    res.json({
-      success: true,
-      data: bookings,
-      pagination: { total, page: Number(page), pages: Math.ceil(total / limit) },
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch bookings" });
-  }
-});
-
-// ─── POST /api/bookings ───────────────────────────────────────────────────
-// Create a booking and Razorpay order
-router.post("/", async (req, res) => {
-  try {
-    const { bookingType, hotel, train, pricing, itineraryId } = req.body;
-
-    if (!bookingType || !pricing) {
-      return res.status(400).json({ success: false, message: "Booking type and pricing required" });
-    }
-
-    // Create Razorpay Order
-    const razorpayOrder = await getRazorpay().orders.create({
-      amount: Math.round(pricing.totalAmount * 100), // Amount in paise
-      currency: "INR",
-      receipt: `GT-${Date.now()}`,
-      notes: {
-        userId: req.user._id.toString(),
-        bookingType,
+    // ─── Hotel Booking Fields ──────────────────────────────────────────
+    hotel: {
+      hotelId: String,           // RapidAPI hotel ID
+      hotelName: String,
+      hotelAddress: String,
+      hotelCity: String,
+      hotelCountry: { type: String, default: "India" },
+      roomType: String,
+      checkIn: Date,
+      checkOut: Date,
+      nights: Number,
+      guests: {
+        adults: { type: Number, default: 1 },
+        children: { type: Number, default: 0 },
       },
-    });
+      amenities: [String],
+      hotelImageUrl: String,
+      ecoRating: Number,
+    },
 
-    // Create booking in DB
-    const booking = await Booking.create({
-      userId: req.user._id,
-      itineraryId: itineraryId || null,
-      bookingType,
-      hotel: bookingType === "hotel" ? hotel : undefined,
-      train: bookingType === "train" ? train : undefined,
-      pricing,
-      payment: {
-        status: "pending",
-        razorpayOrderId: razorpayOrder.id,
-      },
-      status: "pending",
-    });
-
-    res.status(201).json({
-      success: true,
-      message: "Booking initiated",
-      data: {
-        booking,
-        razorpayOrderId: razorpayOrder.id,
-        razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-        amount: razorpayOrder.amount,
-        currency: razorpayOrder.currency,
-      },
-    });
-  } catch (error) {
-    console.error("Create booking error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to create booking" });
-  }
-});
-
-// ─── POST /api/bookings/verify-payment ───────────────────────────────────
-// Verify Razorpay payment signature
-router.post("/verify-payment", async (req, res) => {
-  try {
-    const { bookingId, razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
-
-    // Verify signature
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-      .digest("hex");
-
-    if (expectedSignature !== razorpaySignature) {
-      await Booking.findByIdAndUpdate(bookingId, {
-        $set: { "payment.status": "failed", status: "failed" },
-      });
-      return res.status(400).json({ success: false, message: "Payment verification failed" });
-    }
-
-    // Update booking as paid
-    const booking = await Booking.findByIdAndUpdate(
-      bookingId,
-      {
-        $set: {
-          "payment.status": "paid",
-          "payment.razorpayPaymentId": razorpayPaymentId,
-          "payment.razorpaySignature": razorpaySignature,
-          "payment.paidAt": new Date(),
-          status: "confirmed",
+    // ─── Train Booking Fields ──────────────────────────────────────────
+    train: {
+      trainNumber: String,
+      trainName: String,
+      fromStation: String,
+      fromStationCode: String,
+      toStation: String,
+      toStationCode: String,
+      departureDate: Date,
+      departureTime: String,
+      arrivalTime: String,
+      duration: String,
+      classType: String,       // SL, 3A, 2A, 1A, CC
+      passengers: [
+        {
+          name: String,
+          age: Number,
+          gender: String,
+          idType: String,
+          idNumber: String,
         },
+      ],
+      pnrNumber: String,
+      seatNumbers: [String],
+    },
+
+    // ─── Pricing ──────────────────────────────────────────────────────
+    pricing: {
+      basePrice: { type: Number, required: true },
+      taxes: { type: Number, default: 0 },
+      discount: { type: Number, default: 0 },
+      totalAmount: { type: Number, required: true },
+      currency: { type: String, default: "INR" },
+    },
+
+    // ─── Payment ──────────────────────────────────────────────────────
+    payment: {
+      status: {
+        type: String,
+        enum: ["pending", "paid", "failed", "refunded"],
+        default: "pending",
       },
-      { new: true }
-    );
+      method: String,
+      razorpayOrderId: String,
+      razorpayPaymentId: String,
+      razorpaySignature: String,
+      paidAt: Date,
+    },
 
-    // Update user stats
-    await User.findByIdAndUpdate(req.user._id, {
-      $inc: { "stats.totalTrips": 1 },
-    });
+    // ─── Booking Status ───────────────────────────────────────────────
+    status: {
+      type: String,
+      enum: ["pending", "confirmed", "cancelled", "completed", "failed"],
+      default: "pending",
+    },
 
-    res.json({ success: true, message: "Payment verified. Booking confirmed!", data: booking });
-  } catch (error) {
-    console.error("Payment verification error:", error.message);
-    res.status(500).json({ success: false, message: "Payment verification failed" });
+    bookingReference: {
+      type: String,
+      unique: true,
+      default: () => `GT-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
+    },
+
+    cancellationReason: String,
+    cancelledAt: Date,
+    notes: String,
+  },
+  {
+    timestamps: true,
   }
-});
+);
 
-// ─── GET /api/bookings/:id ────────────────────────────────────────────────
-router.get("/:id", async (req, res) => {
-  try {
-    const booking = await Booking.findOne({
-      _id: req.params.id,
-      userId: req.user._id,
-    });
+bookingSchema.index({ userId: 1, bookingType: 1, createdAt: -1 });
 
-    if (!booking) {
-      return res.status(404).json({ success: false, message: "Booking not found" });
-    }
-
-    res.json({ success: true, data: booking });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch booking" });
-  }
-});
-
-// ─── POST /api/bookings/:id/cancel ───────────────────────────────────────
-router.post("/:id/cancel", async (req, res) => {
-  try {
-    const booking = await Booking.findOne({
-      _id: req.params.id,
-      userId: req.user._id,
-    });
-
-    if (!booking) {
-      return res.status(404).json({ success: false, message: "Booking not found" });
-    }
-
-    if (["cancelled", "completed"].includes(booking.status)) {
-      return res.status(400).json({ success: false, message: `Booking already ${booking.status}` });
-    }
-
-    const updated = await Booking.findByIdAndUpdate(
-      req.params.id,
-      {
-        $set: {
-          status: "cancelled",
-          cancellationReason: req.body.reason || "Cancelled by user",
-          cancelledAt: new Date(),
-        },
-      },
-      { new: true }
-    );
-
-    res.json({ success: true, message: "Booking cancelled", data: updated });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to cancel booking" });
-  }
-});
-
-module.exports = router;
+module.exports = mongoose.model("Booking", bookingSchema);
