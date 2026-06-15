@@ -8,11 +8,21 @@ const { protect } = require("../middleware/authMiddleware");
 const router = express.Router();
 router.use(protect);
 
-// Initialize Razorpay
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+// Lazy-initialize Razorpay — only when a booking route is actually called.
+// This prevents a crash at startup if RAZORPAY keys are not yet set.
+let _razorpay = null;
+function getRazorpay() {
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+    throw new Error("Razorpay keys not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to your environment variables.");
+  }
+  if (!_razorpay) {
+    _razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  }
+  return _razorpay;
+}
 
 // ─── GET /api/bookings ────────────────────────────────────────────────────
 router.get("/", async (req, res) => {
@@ -50,7 +60,7 @@ router.post("/", async (req, res) => {
     }
 
     // Create Razorpay Order
-    const razorpayOrder = await razorpay.orders.create({
+    const razorpayOrder = await getRazorpay().orders.create({
       amount: Math.round(pricing.totalAmount * 100), // Amount in paise
       currency: "INR",
       receipt: `GT-${Date.now()}`,
